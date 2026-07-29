@@ -1,0 +1,49 @@
+version: "3.9"
+
+services:
+  gateway:
+    build: ./gateway
+    container_name: api-gateway
+    ports:
+      - "8000:8000"
+    depends_on:
+      - postgres
+      - redis
+      - user-service
+      - order-service
+    environment:
+      DATABASE_URL: postgresql://gateway_user:gateway_password@postgres:5432/gateway_db
+      REDIS_URL: redis://redis:6379/0
+
+  postgres:
+    image: postgres:16
+    container_name: gateway-postgres
+    environment:
+      POSTGRES_USER: gateway_user
+      POSTGRES_PASSWORD: gateway_password
+      POSTGRES_DB: gateway_db
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+  redis:
+    image: redis:7
+    container_name: gateway-redis
+    ports:
+      - "6379:6379"
+
+  user-service:
+    build: ./mock-user-service
+    container_name: user-service
+    ports:
+      - "8001:8001"
+
+  order-service:
+    build: ./mock-order-service
+    container_name: order-service
+    ports:
+      - "8002:8002"
+
+volumes:
+  postgres_data:
