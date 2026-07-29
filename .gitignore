@@ -1,16 +1,5 @@
-# Python
-__pycache__/
-*.py[cod]
-*.log
-
-# Virtual Environment
-.venv/
-
-# Environment
 .env
-
-# VS Code
-.vscode/
-
-# Tests
+venv/
+__pycache__/
+*.pyc
 .pytest_cache/
