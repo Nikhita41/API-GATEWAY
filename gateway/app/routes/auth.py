@@ -1,4 +1,12 @@
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import (
+    APIRouter,
+    Depends,
+    HTTPException,
+    Header,
+    Response,
+)
+from app.core.rate_limiter import check_rate_limit
+from fastapi import Header
 from sqlalchemy.orm import Session
 from app.services.auth_service import login_user
 from app.auth.password import hash_password
@@ -173,17 +181,46 @@ def logout(
     }
 @router.get("/test-auth")
 def test_auth(
-    authorization: str | None = Header(default=None),
+    response: Response,
+    credentials: HTTPAuthorizationCredentials = Depends(bearer_scheme),
     x_api_key: str | None = Header(default=None),
     db: Session = Depends(get_db),
 ):
+    authorization = f"Bearer {credentials.credentials}"
+
     user = authenticate(
         db=db,
         authorization=authorization,
         api_key=x_api_key,
     )
 
+    # Determine rate-limit tier and identifier
+    if x_api_key:
+        tier = getattr(user, "tier", "free")
+        identifier = f"apikey:{user.id}"
+    else:
+        tier = "free"
+        identifier = f"user:{user.get('sub')}"
+
+    # Apply Redis rate limit
+    rate_limit = check_rate_limit(
+        identifier=identifier,
+        tier=tier,
+    )
+
+    # Add rate-limit headers
+    response.headers["X-RateLimit-Limit"] = str(
+        rate_limit["limit"]
+    )
+    response.headers["X-RateLimit-Remaining"] = str(
+        rate_limit["remaining"]
+    )
+    response.headers["X-RateLimit-Reset"] = str(
+        rate_limit["reset"]
+    )
+
     return {
         "message": "Authentication successful",
         "authenticated_as": user,
+        "rate_limit": rate_limit,
     }
