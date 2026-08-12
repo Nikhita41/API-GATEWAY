@@ -14,7 +14,8 @@ services:
     environment:
       DATABASE_URL: postgresql://gateway_user:gateway_password@postgres:5432/gateway_db
       REDIS_URL: redis://redis:6379/0
-
+      JWT_SECRET: ${JWT_SECRET}
+      JWT_ALGORITHM: ${JWT_ALGORITHM}
   postgres:
     image: postgres:16
     container_name: gateway-postgres
