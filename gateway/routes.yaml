@@ -1,0 +1,6 @@
+routes:
+  - path: /users
+    upstream: http://user-service:8001
+
+  - path: /orders
+    upstream: http://order-service:8002

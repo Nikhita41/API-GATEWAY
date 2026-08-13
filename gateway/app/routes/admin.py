@@ -13,11 +13,15 @@ router = APIRouter(
 @router.post("/api-keys")
 def create_new_api_key(
     owner_id: int,
+    tier: str = "free",
+    scopes: str = "",
     db: Session = Depends(get_db),
 ):
     raw_key, api_key = create_api_key(
         db=db,
         owner_id=owner_id,
+        tier=tier,
+        scopes=scopes,
     )
 
     return {

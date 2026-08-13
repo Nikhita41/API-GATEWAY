@@ -5,7 +5,7 @@ from fastapi import (
     Header,
     Response,
 )
-from app.core.rate_limiter import check_rate_limit
+from app.ratelimit.limiter import check_rate_limit
 from fastapi import Header
 from sqlalchemy.orm import Session
 from app.services.auth_service import login_user
@@ -204,8 +204,8 @@ def test_auth(
 
     # Apply Redis rate limit
     rate_limit = check_rate_limit(
-        identifier=identifier,
-        tier=tier,
+    client_id=identifier,
+    tier=tier,
     )
 
     # Add rate-limit headers
@@ -216,7 +216,7 @@ def test_auth(
         rate_limit["remaining"]
     )
     response.headers["X-RateLimit-Reset"] = str(
-        rate_limit["reset"]
+        rate_limit["retry_after"]
     )
 
     return {

@@ -2,8 +2,7 @@ from fastapi import FastAPI
 
 from app.routes.auth import router as auth_router
 from app.routes.admin import router as admin_router
-
-print("Loaded router:", auth_router)
+from app.routing.router import router as proxy_router
 
 app = FastAPI(
     title="API Gateway",
@@ -12,8 +11,7 @@ app = FastAPI(
 
 app.include_router(auth_router)
 app.include_router(admin_router)
-
-print(app.routes)
+app.include_router(proxy_router)
 
 
 @app.get("/health")
