@@ -4,3 +4,4 @@ routes:
 
   - path: /orders
     upstream: http://order-service:8002
+    

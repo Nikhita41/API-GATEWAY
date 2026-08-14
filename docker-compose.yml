@@ -36,9 +36,10 @@ services:
 
   user-service:
     build: ./mock-user-service
-    container_name: user-service
-    ports:
-      - "8001:8001"
+    expose:
+      - "8001"
+    deploy:
+      replicas: 2
 
   order-service:
     build: ./mock-order-service
