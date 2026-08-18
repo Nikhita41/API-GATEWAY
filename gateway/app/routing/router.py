@@ -1,8 +1,10 @@
+import asyncio
 from pathlib import Path
 from urllib.parse import urlparse
 from uuid import uuid4
-import yaml
+
 import httpx
+import yaml
 from fastapi import APIRouter, Depends, Request, Response
 from sqlalchemy.orm import Session
 
@@ -12,8 +14,10 @@ from app.cache.cache import (
     invalidate_cache,
     set_cached_response,
 )
+from app.circuitbreaker.breaker import CircuitBreaker, CircuitState
 from app.core.authenticate import authenticate
 from app.db.database import get_db
+from app.health.checker import check_service
 from app.loadbalancer.balancer import load_balancer
 from app.ratelimit.limiter import check_rate_limit
 
@@ -33,12 +37,80 @@ routes = config["routes"]
 router = APIRouter()
 
 
+# ============================================================
+# Health monitoring
+# ============================================================
+
+_health_status: dict[str, dict[str, bool]] = {}
+_health_task: asyncio.Task | None = None
+
+
+@router.get("/health/status")
+async def health_status():
+    return {
+        "status": "healthy",
+        "upstreams": _health_status,
+    }
+
+
+async def refresh_health():
+    global _health_status
+
+    for route in routes:
+        upstream = route["upstream"]
+
+        health = await check_service(upstream)
+
+        _health_status[upstream] = health
+
+        load_balancer.update_health(
+            upstream,
+            health,
+        )
+
+
+async def health_monitor():
+    while True:
+        try:
+            await refresh_health()
+        except Exception:
+            pass
+
+        await asyncio.sleep(5)
+
+
+async def start_health_monitor():
+    global _health_task
+
+    await refresh_health()
+
+    _health_task = asyncio.create_task(
+        health_monitor()
+    )
+
+
+# ============================================================
+# Routing helpers
+# ============================================================
+
 def find_route(path: str):
     for route in routes:
         if path.startswith(route["path"]):
             return route
 
     return None
+
+
+def get_circuit_breaker(route: dict) -> CircuitBreaker:
+    upstream = route["upstream"]
+
+    parsed = urlparse(upstream)
+
+    service_name = parsed.hostname or upstream
+
+    return CircuitBreaker(
+        service=service_name,
+    )
 
 
 def get_authenticated_identity(
@@ -74,13 +146,17 @@ def get_authenticated_identity(
     return f"user:{sub}", "free"
 
 
+# ============================================================
+# Proxy
+# ============================================================
+
 async def proxy_request(
     request: Request,
     db: Session,
 ):
-    # -----------------------------
+    # --------------------------------------------------------
     # Find route
-    # -----------------------------
+    # --------------------------------------------------------
 
     route = find_route(request.url.path)
 
@@ -90,36 +166,50 @@ async def proxy_request(
             status_code=404,
         )
 
-    # -----------------------------
+    # --------------------------------------------------------
+    # Circuit breaker
+    # --------------------------------------------------------
+
+    circuit_breaker = get_circuit_breaker(route)
+
+    if not circuit_breaker.allow_request():
+        correlation_id = request.headers.get(
+            "X-Correlation-ID",
+            str(uuid4()),
+        )
+
+        return Response(
+            content='{"detail":"Upstream service temporarily unavailable"}',
+            status_code=503,
+            media_type="application/json",
+            headers={
+                "X-Correlation-ID": correlation_id,
+                "X-Circuit-State": CircuitState.OPEN.value,
+            },
+        )
+
+    # --------------------------------------------------------
     # Authentication
-    # -----------------------------
+    # --------------------------------------------------------
 
     identifier, tier = get_authenticated_identity(
         request,
         db,
     )
 
-    # -----------------------------
+    # --------------------------------------------------------
     # Rate limiting
-    # -----------------------------
+    # --------------------------------------------------------
 
     rate_limit = check_rate_limit(
         client_id=identifier,
         tier=tier,
     )
 
-    # -----------------------------
-    # Correlation ID
-    # -----------------------------
-
     correlation_id = request.headers.get(
         "X-Correlation-ID",
         str(uuid4()),
     )
-
-    # -----------------------------
-    # Rate limit rejection
-    # -----------------------------
 
     if not rate_limit["allowed"]:
         return Response(
@@ -141,25 +231,23 @@ async def proxy_request(
             },
         )
 
-    # -----------------------------
-    # Cache key
-    # -----------------------------
+    # --------------------------------------------------------
+    # Cache lookup
+    # --------------------------------------------------------
 
     cache_key = build_cache_key(
-        request=request,
-        auth_scope=identifier,
+        request,
+        identifier,
     )
 
-    # -----------------------------
-    # Cache lookup
-    # -----------------------------
-
     if request.method.upper() == "GET":
-        cached = get_cached_response(cache_key)
+        cached_response = get_cached_response(
+            cache_key
+        )
 
-        if cached is not None:
+        if cached_response is not None:
             cached_headers = dict(
-                cached.get("headers", {})
+                cached_response.get("headers", {})
             )
 
             cached_headers["X-Cache"] = "HIT"
@@ -180,90 +268,86 @@ async def proxy_request(
             )
 
             return Response(
-                content=cached["body"],
-                status_code=cached["status_code"],
+                content=cached_response["body"],
+                status_code=cached_response["status_code"],
                 headers=cached_headers,
                 media_type=cached_headers.get(
                     "content-type"
                 ),
             )
 
-    # -----------------------------
-    # Select backend replica
-    # -----------------------------
+    # --------------------------------------------------------
+    # Build upstream URL
+    # --------------------------------------------------------
 
-    selected_upstream = load_balancer.get_upstream(
+    upstream_url = load_balancer.get_upstream(
         route["upstream"]
     )
 
-    # -----------------------------
-    # Build upstream URL
-    # -----------------------------
-
-    upstream_url = (
-        selected_upstream + request.url.path
-    )
+    upstream_url += request.url.path
 
     if request.url.query:
         upstream_url += f"?{request.url.query}"
 
-    # -----------------------------
-    # Preserve original upstream Host
-    # -----------------------------
-
-    original_host = urlparse(
-        route["upstream"]
-    ).netloc
-
-    # -----------------------------
-    # Forward headers
-    # -----------------------------
+    # --------------------------------------------------------
+    # Forward request headers
+    # --------------------------------------------------------
 
     headers = dict(request.headers)
 
     headers.pop("host", None)
 
-    headers["Host"] = original_host
     headers["X-Correlation-ID"] = correlation_id
 
-    # -----------------------------
+    # --------------------------------------------------------
     # Forward request
-    # -----------------------------
+    # --------------------------------------------------------
 
-    request_kwargs = {
-        "method": request.method,
-        "url": upstream_url,
-        "headers": headers,
-    }
+    try:
+        async with httpx.AsyncClient() as client:
+            upstream_response = await client.request(
+                method=request.method,
+                url=upstream_url,
+                headers=headers,
+                content=await request.body(),
+            )
 
-    if request.method.upper() not in ("GET", "HEAD", "OPTIONS"):
-        request_kwargs["content"] = await request.body()
+    except (
+        httpx.ConnectError,
+        httpx.ConnectTimeout,
+        httpx.ReadTimeout,
+        httpx.RemoteProtocolError,
+    ):
+        circuit_breaker.record_failure()
 
-    async with httpx.AsyncClient() as client:
-        upstream_response = await client.request(**request_kwargs)
+        return Response(
+            content='{"detail":"Upstream service unavailable"}',
+            status_code=503,
+            media_type="application/json",
+            headers={
+                "X-Correlation-ID": correlation_id,
+                "X-Circuit-State": (
+                    circuit_breaker.get_state().value
+                ),
+            },
+        )
 
-    # -----------------------------
+    # --------------------------------------------------------
+    # Circuit breaker result
+    # --------------------------------------------------------
+
+    if upstream_response.status_code >= 500:
+        circuit_breaker.record_failure()
+    else:
+        circuit_breaker.record_success()
+
+    # --------------------------------------------------------
     # Response headers
-    # -----------------------------
+    # --------------------------------------------------------
 
-    excluded_headers = {
-        "content-encoding",
-        "content-length",
-        "transfer-encoding",
-        "connection",
-        "keep-alive",
-        "proxy-authenticate",
-        "proxy-authorization",
-        "te",
-        "trailers",
-        "upgrade",
-    }
-
-    response_headers = {
-        k: v
-        for k, v in upstream_response.headers.items()
-        if k.lower() not in excluded_headers
-    }
+    response_headers = dict(
+        upstream_response.headers
+    )
 
     response_headers["X-Correlation-ID"] = (
         correlation_id
@@ -281,32 +365,30 @@ async def proxy_request(
         rate_limit["retry_after"]
     )
 
-    # -----------------------------
-    # Cache successful GET
-    # -----------------------------
+    # --------------------------------------------------------
+    # Cache successful GET responses
+    # --------------------------------------------------------
 
     if (
         request.method.upper() == "GET"
         and upstream_response.status_code == 200
     ):
+        cache_headers = dict(
+            upstream_response.headers
+        )
+
         set_cached_response(
             cache_key=cache_key,
             status_code=upstream_response.status_code,
-            headers=dict(upstream_response.headers),
+            headers=cache_headers,
             body=upstream_response.content,
         )
 
         response_headers["X-Cache"] = "MISS"
 
-    elif request.method.upper() == "GET":
-        response_headers["X-Cache"] = "BYPASS"
-
-    else:
-        response_headers["X-Cache"] = "BYPASS"
-
-    # -----------------------------
-    # Invalidate cache after mutation
-    # -----------------------------
+    # --------------------------------------------------------
+    # Invalidate cache for mutations
+    # --------------------------------------------------------
 
     if request.method.upper() in {
         "POST",
@@ -314,11 +396,13 @@ async def proxy_request(
         "PATCH",
         "DELETE",
     }:
-        invalidate_cache(request.url.path)
+        invalidate_cache(
+            request.url.path
+        )
 
-    # -----------------------------
-    # Return response
-    # -----------------------------
+    # --------------------------------------------------------
+    # Return upstream response
+    # --------------------------------------------------------
 
     return Response(
         content=upstream_response.content,
@@ -331,7 +415,7 @@ async def proxy_request(
 
 
 # ============================================================
-# USERS
+# User routes
 # ============================================================
 
 @router.api_route(
@@ -367,7 +451,7 @@ async def users_proxy(
 
 
 # ============================================================
-# ORDERS
+# Order routes
 # ============================================================
 
 @router.api_route(
