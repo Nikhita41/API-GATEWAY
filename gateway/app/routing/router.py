@@ -304,18 +304,37 @@ async def proxy_request(
     # --------------------------------------------------------
 
     try:
-        async with httpx.AsyncClient() as client:
+        timeout = httpx.Timeout(
+            connect=3.0,
+            read=5.0,
+            write=5.0,
+            pool=5.0,
+        )
+
+        async with httpx.AsyncClient(
+            timeout=timeout,
+        ) as client:
             upstream_response = await client.request(
                 method=request.method,
                 url=upstream_url,
-                headers=headers,
-                content=await request.body(),
+                headers=forward_headers,
+                content=body,
             )
 
     except (
-        httpx.ConnectError,
         httpx.ConnectTimeout,
         httpx.ReadTimeout,
+    ):
+        circuit_breaker.record_failure()
+
+        return Response(
+            content='{"detail":"Upstream service timed out"}',
+            status_code=504,
+            media_type="application/json",
+        )
+
+    except (
+        httpx.ConnectError,
         httpx.RemoteProtocolError,
     ):
         circuit_breaker.record_failure()
@@ -324,14 +343,7 @@ async def proxy_request(
             content='{"detail":"Upstream service unavailable"}',
             status_code=503,
             media_type="application/json",
-            headers={
-                "X-Correlation-ID": correlation_id,
-                "X-Circuit-State": (
-                    circuit_breaker.get_state().value
-                ),
-            },
         )
-
     # --------------------------------------------------------
     # Circuit breaker result
     # --------------------------------------------------------
