@@ -220,7 +220,12 @@ def test_auth(
     # Determine rate-limit tier and identifier
     if x_api_key:
         tier = getattr(user, "tier", "free")
-        identifier = f"apikey:{user.id}"
+        user_id = (
+            user.get("id")
+            if isinstance(user, dict)
+            else getattr(user, "id", None)
+        )
+        identifier = f"apikey:{user_id}"
     else:
         tier = "free"
         identifier = f"user:{user.get('sub')}"
