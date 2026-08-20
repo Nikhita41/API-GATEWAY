@@ -22,6 +22,7 @@ from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from app.auth.jwt_handler import decode_token
 from fastapi import Header
 from app.core.redis import redis_client
+from app.security.ip_blocklist import block_ip
 bearer_scheme = HTTPBearer()
 router = APIRouter(
     prefix="/auth",
@@ -76,6 +77,7 @@ def signup(
     return new_user
 @router.post("/login")
 def login(
+    request: Request,
     email: str,
     password: str,
     db: Session = Depends(get_db),
@@ -87,6 +89,27 @@ def login(
     )
 
     if not result:
+        client_ip = (
+            request.client.host
+            if request.client
+            else "unknown"
+        )
+
+        if client_ip != "unknown":
+            key = f"security:failed_login:{client_ip}"
+
+            failed_attempts = redis_client.incr(key)
+
+            # Keep failed-login counter for 10 minutes
+            redis_client.expire(key, 600)
+
+            # Block IP after 5 failed attempts
+            if failed_attempts >= 5:
+                block_ip(
+                    client_ip,
+                    ttl=900,
+                )
+
         raise HTTPException(
             status_code=401,
             detail="Invalid email or password",

@@ -1,6 +1,5 @@
 from contextlib import asynccontextmanager
-
-from fastapi import FastAPI
+from app.security.waf import WAFMiddleware
 from fastapi import FastAPI, HTTPException
 
 from app.core.errors import (
@@ -25,11 +24,53 @@ async def lifespan(app: FastAPI):
     yield
 
 
+from fastapi.openapi.utils import get_openapi
+
 app = FastAPI(
     title="API Gateway",
     version="1.0.0",
     lifespan=lifespan,
 )
+
+def custom_openapi():
+    if app.openapi_schema:
+        return app.openapi_schema
+    
+    openapi_schema = get_openapi(
+        title="API Gateway",
+        version="1.0.0",
+        routes=app.routes,
+    )
+    
+    if "components" not in openapi_schema:
+        openapi_schema["components"] = {}
+        
+    if "securitySchemes" not in openapi_schema["components"]:
+        openapi_schema["components"]["securitySchemes"] = {}
+        
+    # Remove the auto-generated HTTPBearer scheme if it exists
+    if "HTTPBearer" in openapi_schema["components"]["securitySchemes"]:
+        del openapi_schema["components"]["securitySchemes"]["HTTPBearer"]
+        
+    # Add our custom bearerAuth scheme
+    openapi_schema["components"]["securitySchemes"]["bearerAuth"] = {
+        "type": "http",
+        "scheme": "bearer",
+        "bearerFormat": "JWT",
+    }
+    
+    # Replace references to HTTPBearer with bearerAuth in all endpoints
+    for path in openapi_schema.get("paths", {}).values():
+        for operation in path.values():
+            if "security" in operation:
+                for sec in operation["security"]:
+                    if "HTTPBearer" in sec:
+                        sec["bearerAuth"] = sec.pop("HTTPBearer")
+    
+    app.openapi_schema = openapi_schema
+    return app.openapi_schema
+
+app.openapi = custom_openapi
 
 app.add_exception_handler(
     HTTPException,
@@ -39,6 +80,10 @@ app.add_exception_handler(
 app.add_exception_handler(
     Exception,
     unhandled_exception_handler,
+)
+
+app.add_middleware(
+    WAFMiddleware
 )
 
 app.add_middleware(

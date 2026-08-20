@@ -299,6 +299,8 @@ async def proxy_request(
 
     headers["X-Correlation-ID"] = correlation_id
 
+    body = await request.body()
+
     # --------------------------------------------------------
     # Forward request
     # --------------------------------------------------------
@@ -317,7 +319,7 @@ async def proxy_request(
             upstream_response = await client.request(
                 method=request.method,
                 url=upstream_url,
-                headers=forward_headers,
+                headers=headers,
                 content=body,
             )
 
@@ -440,6 +442,7 @@ async def proxy_request(
         "DELETE",
         "OPTIONS",
     ],
+    openapi_extra={"security": [{"bearerAuth": []}]},
 )
 @router.api_route(
     "/users",
@@ -451,6 +454,7 @@ async def proxy_request(
         "DELETE",
         "OPTIONS",
     ],
+    openapi_extra={"security": [{"bearerAuth": []}]},
 )
 async def users_proxy(
     request: Request,
@@ -476,6 +480,7 @@ async def users_proxy(
         "DELETE",
         "OPTIONS",
     ],
+    openapi_extra={"security": [{"bearerAuth": []}]},
 )
 @router.api_route(
     "/orders",
@@ -487,6 +492,7 @@ async def users_proxy(
         "DELETE",
         "OPTIONS",
     ],
+    openapi_extra={"security": [{"bearerAuth": []}]},
 )
 async def orders_proxy(
     request: Request,

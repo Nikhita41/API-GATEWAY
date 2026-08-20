@@ -11,7 +11,7 @@ class Settings(BaseSettings):
     JWT_ALGORITHM: str = "HS256"
     REDIS_URL: str
     
-    ACCESS_TOKEN_EXPIRE_MINUTES: int = 15
+    ACCESS_TOKEN_EXPIRE_MINUTES: int = 1440
     REFRESH_TOKEN_EXPIRE_DAYS: int = 7
 
     model_config = SettingsConfigDict(
@@ -19,7 +19,4 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
-settings = Settings()
-
-
-settings = Settings()
+settings = Settings()  # pyright: ignore[reportCallIssue]
